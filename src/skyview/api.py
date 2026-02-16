@@ -56,6 +56,10 @@ def _coerce_targets(targets, dec=None):
     if _is_2d_array(targets):
         return [(float(row[0]), float(row[1])) for row in targets]
 
+    # Fallback 2D check: has .shape with ndim==2, or iterates into indexable rows
+    if hasattr(targets, 'ndim') and targets.ndim == 2:
+        return [(float(row[0]), float(row[1])) for row in targets]
+
     # Style: batch((ra_series, dec_series)) — tuple/list of two array-likes
     if isinstance(targets, (tuple, list)) and len(targets) == 2:
         a, b = targets[0], targets[1]
@@ -87,13 +91,27 @@ def _coerce_targets(targets, dec=None):
 
 def _resolve_target(t):
     """Resolve a single target to (label, ra, dec)."""
-    if isinstance(t, tuple) and len(t) == 2:
-        ra, dec = t
-        return f"({ra:.4f}, {dec:.4f})", float(ra), float(dec)
-    else:
-        name = str(t)
-        ra, dec = parse_coordinates(name)
-        return name, ra, dec
+    # (ra, dec) tuple or list
+    if isinstance(t, (tuple, list)) and len(t) >= 2:
+        try:
+            ra, dec = float(t[0]), float(t[1])
+            return f"({ra:.4f}, {dec:.4f})", ra, dec
+        except (ValueError, TypeError):
+            pass
+
+    # numpy array row (ndarray with 2+ elements)
+    if hasattr(t, '__len__') and not isinstance(t, str):
+        try:
+            if len(t) >= 2:
+                ra, dec = float(t[0]), float(t[1])
+                return f"({ra:.4f}, {dec:.4f})", ra, dec
+        except (ValueError, TypeError, IndexError):
+            pass
+
+    # Try as number pair in string form, or object name
+    name = str(t)
+    ra, dec = parse_coordinates(name)
+    return name, ra, dec
 
 
 def _fetch_one(idx, label, ra, dec, survey, fov, size):
