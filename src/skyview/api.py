@@ -306,7 +306,7 @@ def show(target: str = "", ra: float = None, dec: float = None,
 def batch(targets, dec=None,
           survey: str = None, fov: float = 1.0, size: int = 0,
           cols: int = 5, thumb_size: tuple = (3, 3),
-          save: str = "", workers: int = 8, **kwargs) -> None:
+          save: str = "", workers: int = 3, **kwargs) -> None:
     """Fetch and display a grid of sky image thumbnails.
 
     Downloads images concurrently for speed.  Thumbnail pixel size is
@@ -340,7 +340,8 @@ def batch(targets, dec=None,
     save : str, optional
         If set, save the grid figure to this file path instead of displaying.
     workers : int, optional
-        Number of concurrent download threads (default ``8``).
+        Number of concurrent download threads (default ``3``).
+        Keep low to avoid 429 rate limits from survey servers.
 
     Examples
     --------

@@ -245,8 +245,13 @@ def fetch_cutout(ra: float, dec: float, survey: str | None = None,
 
 def _fetch_single(ra: float, dec: float, survey: str,
                   size: int, pixscale: float, fov: float,
-                  timeout: float) -> Image.Image:
-    """Fetch a cutout from a single specific survey (no fallback)."""
+                  timeout: float, max_retries: int = 3) -> Image.Image:
+    """Fetch a cutout from a single specific survey (no fallback).
+
+    Retries with exponential backoff on 429 (rate limit) errors.
+    """
+    import time
+
     cfg = get_survey(survey)
 
     ps = pixscale or cfg.default_pixscale
@@ -261,14 +266,24 @@ def _fetch_single(ra: float, dec: float, survey: str,
         return _fetch_panstarrs(ra, dec, sz, ps, timeout)
 
     url = cfg.cutout_url(ra, dec, sz, ps)
-    resp = requests.get(url, timeout=timeout)
-    resp.raise_for_status()
 
-    content_type = resp.headers.get("content-type", "")
-    if "image" not in content_type:
-        raise RuntimeError(f"Survey {survey} returned non-image: {content_type}")
+    for attempt in range(max_retries + 1):
+        resp = requests.get(url, timeout=timeout)
+        if resp.status_code == 429:
+            # Rate limited — wait and retry
+            wait = 2 ** attempt  # 1s, 2s, 4s
+            time.sleep(wait)
+            continue
+        resp.raise_for_status()
 
-    return Image.open(BytesIO(resp.content))
+        content_type = resp.headers.get("content-type", "")
+        if "image" not in content_type:
+            raise RuntimeError(f"Survey {survey} returned non-image: {content_type}")
+
+        return Image.open(BytesIO(resp.content))
+
+    # All retries exhausted
+    resp.raise_for_status()  # will raise the 429 error
 
 
 def _fetch_panstarrs(ra: float, dec: float, size: int, pixscale: float,
