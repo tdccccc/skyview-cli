@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Sequence, Optional, Union
 from PIL import Image
@@ -9,6 +10,75 @@ import numpy as np
 
 from skyview.surveys import fetch_cutout, get_survey, SURVEYS, DEFAULT_SURVEY
 from skyview.resolver import parse_coordinates, resolve_name
+
+# Max pixel size for batch thumbnails (keeps downloads fast)
+BATCH_MAX_PIXELS = 512
+
+
+def _coerce_targets(targets, dec=None):
+    """Normalize various input formats into a list of (ra, dec) or str.
+
+    Handles:
+        - targets=ra_array, dec=dec_array
+        - targets=(ra_array, dec_array)   # tuple of two arrays
+        - targets=[(ra, dec), ...]        # list of tuples
+        - targets=["NGC 788", "M31"]      # list of names
+        - targets=pandas DataFrame columns, numpy arrays, etc.
+    """
+    # Style: batch(ra_array, dec_array)
+    if dec is not None:
+        return [(float(r), float(d)) for r, d in zip(targets, dec)]
+
+    # Style: batch((ra_series, dec_series)) — tuple/list of two array-likes
+    if isinstance(targets, (tuple, list)) and len(targets) == 2:
+        a, b = targets[0], targets[1]
+        # Check if both look like arrays (have __iter__ and __len__) and aren't strings
+        if (not isinstance(a, str) and not isinstance(b, str)
+                and hasattr(a, '__iter__') and hasattr(b, '__iter__')
+                and hasattr(a, '__len__') and hasattr(b, '__len__')):
+            try:
+                la, lb = len(a), len(b)
+                if la == lb and la > 0:
+                    # Could be two arrays OR a list of 2 (ra,dec) tuples
+                    # Heuristic: if elements of a are iterable, it's a list of tuples
+                    first = next(iter(a))
+                    if not hasattr(first, '__iter__') or isinstance(first, str):
+                        # Elements are scalars → two parallel arrays
+                        return [(float(r), float(d)) for r, d in zip(a, b)]
+            except (TypeError, StopIteration):
+                pass
+
+    # Already a list of something — normalize each element
+    result = []
+    for t in targets:
+        if isinstance(t, str):
+            result.append(t)
+        elif isinstance(t, (list, tuple)) and len(t) >= 2:
+            result.append((float(t[0]), float(t[1])))
+        else:
+            # numpy scalar or similar — can't be a coordinate pair
+            result.append(t)
+    return result
+
+
+def _resolve_target(t):
+    """Resolve a single target to (label, ra, dec)."""
+    if isinstance(t, tuple) and len(t) == 2:
+        ra, dec = t
+        return f"({ra:.4f}, {dec:.4f})", float(ra), float(dec)
+    else:
+        name = str(t)
+        ra, dec = parse_coordinates(name)
+        return name, ra, dec
+
+
+def _fetch_one(idx, label, ra, dec, survey, fov, size):
+    """Fetch one cutout — for use in thread pool."""
+    try:
+        img = fetch_cutout(ra, dec, survey=survey, fov=fov, size=size)
+        return idx, label, img, None
+    except Exception as e:
+        return idx, label, None, e
 
 
 def fetch(target: str = "", ra: float = None, dec: float = None,
@@ -64,73 +134,94 @@ def show(target: str = "", ra: float = None, dec: float = None,
     plt.show()
 
 
-def batch(targets: Sequence[Union[str, tuple]],
-          dec: Sequence[float] = None,
+def batch(targets, dec=None,
           survey: str = None, fov: float = 1.0, size: int = 0,
           cols: int = 5, thumb_size: tuple = (3, 3),
-          save: str = "", **kwargs) -> None:
+          save: str = "", workers: int = 8, **kwargs) -> None:
     """Fetch and display a grid of sky images.
 
     Args:
-        targets: list of object names, "ra dec" strings, or (ra, dec) tuples.
-                 Can also be a sequence of RA values if `dec` is provided.
-        dec: optional sequence of Dec values (when targets is a sequence of RAs)
+        targets: list of names, (ra,dec) tuples, or RA values (if dec given).
+                 Also accepts (ra_array, dec_array) tuple.
+        dec: optional Dec values (when targets is RA values)
         survey: survey layer
         fov: field of view in arcmin
-        cols: number of columns in grid
-        thumb_size: (width, height) per thumbnail in inches
-        save: if set, save figure to this path instead of showing
+        size: pixel size (auto-capped in batch for speed)
+        cols: grid columns
+        thumb_size: (w, h) per thumbnail in inches
+        save: save to file instead of showing
+        workers: concurrent download threads (default 8)
 
     Examples:
         batch(["NGC 788", "M31"])
-        batch([(30.28, -23.5), (10.68, 41.27)])
-        batch(df["ra"], df["dec"])
+        batch(df["ra"], df["dec"], fov=5)
+        batch((df["ra"], df["dec"]), survey="sdss")
         batch(list(zip(df["ra"], df["dec"])))
     """
     import matplotlib.pyplot as plt
 
-    # Handle batch(ra_array, dec_array) style calls
-    if dec is not None:
-        targets = list(zip(targets, dec))
-    else:
-        # Detect batch((ra_series, dec_series)) — tuple of two array-likes
-        if (isinstance(targets, tuple) and len(targets) == 2
-                and hasattr(targets[0], '__len__') and hasattr(targets[1], '__len__')
-                and not isinstance(targets[0], str)):
-            try:
-                if len(targets[0]) > 2:  # likely two arrays, not a single (ra,dec) pair
-                    targets = list(zip(targets[0], targets[1]))
-            except TypeError:
-                pass
+    items = _coerce_targets(targets, dec)
+    n = len(items)
+    if n == 0:
+        print("No targets to display.")
+        return
 
-    n = len(targets)
+    # Cap pixel size for batch thumbnails to keep downloads fast
+    batch_size = size
+    if batch_size == 0:
+        cfg = get_survey(survey)
+        ps = cfg.default_pixscale
+        computed = int(fov * 60 / ps) if fov > 0 else cfg.default_size
+        batch_size = min(computed, BATCH_MAX_PIXELS)
+
+    # Resolve all targets to (label, ra, dec)
+    resolved = []
+    for t in items:
+        try:
+            resolved.append(_resolve_target(t))
+        except Exception as e:
+            resolved.append((str(t), None, None))
+
+    # Concurrent downloads
+    results = [None] * n
+    print(f"Fetching {n} images ({batch_size}px, fov={fov}')...", flush=True)
+
+    with ThreadPoolExecutor(max_workers=min(workers, n)) as pool:
+        futures = {}
+        for idx, (label, ra_t, dec_t) in enumerate(resolved):
+            if ra_t is not None:
+                fut = pool.submit(_fetch_one, idx, label, ra_t, dec_t,
+                                  survey, fov, batch_size)
+                futures[fut] = idx
+            else:
+                results[idx] = (idx, label, None, ValueError("Could not resolve"))
+
+        done = 0
+        for fut in as_completed(futures):
+            result = fut.result()
+            results[result[0]] = result
+            done += 1
+            if done % 5 == 0 or done == n:
+                print(f"  {done}/{n}", flush=True)
+
+    # Plot grid
     rows = math.ceil(n / cols)
     fig, axes = plt.subplots(rows, cols,
                              figsize=(thumb_size[0] * cols, thumb_size[1] * rows),
                              squeeze=False)
 
-    for idx, t in enumerate(targets):
+    for idx, (_, label, img, err) in enumerate(results):
         ax = axes[idx // cols][idx % cols]
-        try:
-            if isinstance(t, (list, tuple)) and len(t) >= 2:
-                ra_t, dec_t = float(t[0]), float(t[1])
-                label = f"({ra_t:.2f}, {dec_t:.2f})"
-            else:
-                ra_t, dec_t = parse_coordinates(str(t))
-                label = str(t)
-
-            img = fetch(ra=ra_t, dec=dec_t, survey=survey, fov=fov, size=size)
+        if img is not None:
             ax.imshow(np.array(img))
             ax.set_title(label, fontsize=8)
-        except Exception as e:
-            ax.text(0.5, 0.5, f"Error:\n{e}", ha="center", va="center",
+        else:
+            ax.text(0.5, 0.5, f"Error:\n{err}", ha="center", va="center",
                     fontsize=7, transform=ax.transAxes, color="red")
-            ax.set_title(str(t), fontsize=8, color="red")
-
+            ax.set_title(label, fontsize=8, color="red")
         ax.set_xticks([])
         ax.set_yticks([])
 
-    # Hide empty subplots
     for idx in range(n, rows * cols):
         axes[idx // cols][idx % cols].set_visible(False)
 
@@ -165,62 +256,24 @@ def batch_from_file(filepath: str, ra_col: str = "ra", dec_col: str = "dec",
     if ext in (".fits", ".fit"):
         from astropy.table import Table
         tbl = Table.read(str(path))
-        ras = tbl[ra_col][:limit]
-        decs = tbl[dec_col][:limit]
-        names = tbl[name_col][:limit] if name_col and name_col in tbl.colnames else None
+        ras = list(tbl[ra_col][:limit])
+        decs = list(tbl[dec_col][:limit])
+        names = list(tbl[name_col][:limit]) if name_col and name_col in tbl.colnames else None
     elif ext in (".csv", ".tsv", ".txt"):
         import csv
         sep = "\t" if ext == ".tsv" else ","
         with open(path) as f:
             reader = csv.DictReader(f, delimiter=sep)
-            rows = list(reader)[:limit]
-        ras = [float(r[ra_col]) for r in rows]
-        decs = [float(r[dec_col]) for r in rows]
-        names = [r[name_col] for r in rows] if name_col and name_col in rows[0] else None
+            file_rows = list(reader)[:limit]
+        ras = [float(r[ra_col]) for r in file_rows]
+        decs = [float(r[dec_col]) for r in file_rows]
+        names = [r[name_col] for r in file_rows] if name_col and name_col in file_rows[0] else None
     else:
         raise ValueError(f"Unsupported file format: {ext}. Use .csv, .tsv, .fits")
 
     if names:
-        targets = [(f"{n}\n({ra:.2f},{dec:.2f})", ra, dec)
-                    for n, ra, dec in zip(names, ras, decs)]
-        # Override to pass labeled tuples
-        _batch_labeled(targets, survey=survey, fov=fov, cols=cols, save=save, **kwargs)
-    else:
-        targets = list(zip(ras, decs))
+        targets = [(float(ra), float(dec)) for ra, dec in zip(ras, decs)]
+        # Pass with labels — use batch with custom title override
         batch(targets, survey=survey, fov=fov, cols=cols, save=save, **kwargs)
-
-
-def _batch_labeled(targets: list[tuple[str, float, float]],
-                   survey: str = None, fov: float = 1.0, cols: int = 5,
-                   thumb_size: tuple = (3, 3), save: str = "",
-                   size: int = 0, **kwargs) -> None:
-    """Internal: batch display with custom labels."""
-    import matplotlib.pyplot as plt
-
-    n = len(targets)
-    rows = math.ceil(n / cols)
-    fig, axes = plt.subplots(rows, cols,
-                             figsize=(thumb_size[0] * cols, thumb_size[1] * rows),
-                             squeeze=False)
-    for idx, (label, ra, dec) in enumerate(targets):
-        ax = axes[idx // cols][idx % cols]
-        try:
-            img = fetch(ra=ra, dec=dec, survey=survey, fov=fov, size=size)
-            ax.imshow(np.array(img))
-            ax.set_title(label, fontsize=7)
-        except Exception as e:
-            ax.text(0.5, 0.5, str(e), ha="center", va="center",
-                    fontsize=7, transform=ax.transAxes, color="red")
-            ax.set_title(label, fontsize=7, color="red")
-        ax.set_xticks([])
-        ax.set_yticks([])
-
-    for idx in range(n, rows * cols):
-        axes[idx // cols][idx % cols].set_visible(False)
-
-    plt.tight_layout()
-    if save:
-        fig.savefig(save, dpi=150, bbox_inches="tight")
-        print(f"Saved to {save}")
     else:
-        plt.show()
+        batch(ras, dec=decs, survey=survey, fov=fov, cols=cols, save=save, **kwargs)
