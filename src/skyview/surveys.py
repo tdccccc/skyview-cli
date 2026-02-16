@@ -168,7 +168,7 @@ def _is_blank_image(img: Image.Image, threshold: int = 10) -> bool:
 def fetch_cutout(ra: float, dec: float, survey: str | None = None,
                  size: int = 0, pixscale: float = 0,
                  fov: float = 0, timeout: float = 30,
-                 fallback: bool = True) -> Image.Image:
+                 fallback: bool = None) -> Image.Image:
     """Fetch a JPEG cutout image, with optional automatic fallback.
 
     If the requested survey returns a blank image (e.g. no coverage at
@@ -181,6 +181,8 @@ def fetch_cutout(ra: float, dec: float, survey: str | None = None,
         Position in decimal degrees.
     survey : str, optional
         Survey name.  ``None`` or ``"auto"`` uses the full fallback chain.
+        When a specific survey is given, fallback is **disabled** by default
+        (the image is returned as-is even if dark/blank).
     size : int, optional
         Cutout size in pixels.
     pixscale : float, optional
@@ -190,39 +192,52 @@ def fetch_cutout(ra: float, dec: float, survey: str | None = None,
     timeout : float, optional
         HTTP request timeout in seconds (default ``30``).
     fallback : bool, optional
-        If True (default), try other surveys when the result is blank.
+        Whether to try other surveys when the result is blank.
+        Default: ``True`` when survey is ``None``/``"auto"``,
+        ``False`` when a specific survey is given.
 
     Returns
     -------
     PIL.Image.Image
     """
-    # Build the list of surveys to try
-    if survey == "auto" or survey is None:
+    # Determine fallback behavior:
+    # - explicit survey → no fallback (dark images may be valid)
+    # - auto/None → fallback enabled
+    auto_mode = (survey is None or survey == "auto")
+    if fallback is None:
+        fallback = auto_mode
+
+    if auto_mode:
         surveys_to_try = list(FALLBACK_ORDER)
     else:
         surveys_to_try = [survey]
         if fallback:
             surveys_to_try += [s for s in FALLBACK_ORDER if s != survey]
 
-    last_img = None
+    best_img = None
+    best_std = -1
     last_error = None
 
     for srv_name in surveys_to_try:
         try:
             img = _fetch_single(ra, dec, srv_name, size, pixscale, fov, timeout)
-            if not _is_blank_image(img):
-                return img
-            last_img = img
             if not fallback:
+                # No fallback — return immediately whatever we got
                 return img
+            # In fallback mode, keep the image with highest std (most content)
+            import numpy as np
+            std = np.array(img).std()
+            if std > best_std:
+                best_img = img
+                best_std = std
+            if not _is_blank_image(img):
+                return img  # Good enough, stop trying
         except Exception as e:
             last_error = e
-            if not fallback:
-                raise
             continue
 
-    if last_img is not None:
-        return last_img
+    if best_img is not None:
+        return best_img
     if last_error:
         raise last_error
     raise RuntimeError(f"No survey could provide image for ({ra}, {dec})")
