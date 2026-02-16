@@ -1,4 +1,16 @@
-"""Survey image providers."""
+"""
+skyview.surveys — Survey definitions and image fetching backend.
+
+Each survey is represented by a :class:`SurveyConfig` dataclass that stores
+API endpoint, pixel scale, size limits, and priority for automatic fallback.
+
+When a requested survey returns a blank image (e.g. the coordinates fall
+outside the survey footprint), the fetcher automatically tries the next
+survey in priority order.
+
+Priority order (high → low):
+    ls-dr10 → ls-dr9 → panstarrs → sdss → des-dr1 → unwise-neo7 → galex
+"""
 
 from __future__ import annotations
 import requests
@@ -10,80 +22,132 @@ from dataclasses import dataclass
 
 @dataclass
 class SurveyConfig:
+    """Configuration for a single sky survey image service.
+
+    Attributes
+    ----------
+    name : str
+        Short identifier used in API calls (e.g. ``"ls-dr10"``).
+    base_url : str
+        Base URL for the cutout endpoint.
+    default_pixscale : float
+        Default pixel scale in arcseconds per pixel.
+    default_size : int
+        Default cutout size in pixels when neither *size* nor *fov* is given.
+    max_size : int
+        Maximum allowed cutout size in pixels (server-side limit).
+    priority : int
+        Fallback priority — higher value = tried first (default ``0``).
+    bands : str, optional
+        Photometric bands available (informational).
+    dec_range : tuple[float, float]
+        Approximate declination coverage ``(dec_min, dec_max)`` in degrees.
+    """
     name: str
     base_url: str
     default_pixscale: float  # arcsec/pixel
-    default_size: int  # pixels
-    max_size: int
-    priority: int = 0  # higher = tried first in fallback
+    default_size: int        # pixels
+    max_size: int            # pixels
+    priority: int = 0
     bands: Optional[str] = None
     dec_range: tuple[float, float] = (-90, 90)
 
     def cutout_url(self, ra: float, dec: float, size: int = 0,
                    pixscale: float = 0, layer: str = "") -> str:
+        """Build the full cutout request URL."""
         sz = size or self.default_size
         ps = pixscale or self.default_pixscale
         return (f"{self.base_url}?ra={ra}&dec={dec}"
                 f"&size={sz}&pixscale={ps}&layer={layer or self.name}")
 
     def covers(self, dec: float) -> bool:
+        """Check if a declination falls within the survey's approximate footprint."""
         return self.dec_range[0] <= dec <= self.dec_range[1]
 
 
-# priority: higher = preferred in auto-fallback
+# ---------------------------------------------------------------------------
+# Survey registry
+# ---------------------------------------------------------------------------
+# Priority: higher value = preferred in auto-fallback.
+# dec_range: approximate sky coverage (not exact — used for quick filtering).
+
 SURVEYS: dict[str, SurveyConfig] = {
     "ls-dr10": SurveyConfig(
         name="ls-dr10",
         base_url="https://www.legacysurvey.org/viewer/cutout.jpg",
         default_pixscale=0.262, default_size=256, max_size=3000,
         priority=100, dec_range=(-70, 90),
+        bands="grz",
     ),
     "ls-dr9": SurveyConfig(
         name="ls-dr9",
         base_url="https://www.legacysurvey.org/viewer/cutout.jpg",
         default_pixscale=0.262, default_size=256, max_size=3000,
         priority=90, dec_range=(-70, 90),
+        bands="grz",
     ),
     "panstarrs": SurveyConfig(
         name="panstarrs",
         base_url="https://ps1images.stsci.edu/cgi-bin/ps1cutouts",
         default_pixscale=0.25, default_size=256, max_size=1200,
         priority=80, dec_range=(-30, 90),
+        bands="grizy",
     ),
     "sdss": SurveyConfig(
         name="sdss",
         base_url="https://www.legacysurvey.org/viewer/cutout.jpg",
         default_pixscale=0.396, default_size=256, max_size=3000,
         priority=70, dec_range=(-20, 70),
+        bands="ugriz",
     ),
     "des-dr1": SurveyConfig(
         name="des-dr1",
         base_url="https://www.legacysurvey.org/viewer/cutout.jpg",
         default_pixscale=0.262, default_size=256, max_size=3000,
         priority=60, dec_range=(-65, 5),
+        bands="grizY",
     ),
     "unwise-neo7": SurveyConfig(
         name="unwise-neo7",
         base_url="https://www.legacysurvey.org/viewer/cutout.jpg",
         default_pixscale=2.75, default_size=256, max_size=3000,
         priority=20, dec_range=(-90, 90),
+        bands="W1W2",
     ),
     "galex": SurveyConfig(
         name="galex",
         base_url="https://www.legacysurvey.org/viewer/cutout.jpg",
         default_pixscale=1.5, default_size=256, max_size=3000,
         priority=10, dec_range=(-90, 90),
+        bands="FUV/NUV",
     ),
 }
 
+#: Default survey used when none is specified.
 DEFAULT_SURVEY = "ls-dr10"
 
-# Fallback order: sorted by priority descending
+#: Surveys sorted by descending priority — used for automatic fallback.
 FALLBACK_ORDER = sorted(SURVEYS.keys(),
                         key=lambda k: SURVEYS[k].priority, reverse=True)
 
 
 def get_survey(name: str | None = None) -> SurveyConfig:
+    """Look up a survey by name.
+
+    Parameters
+    ----------
+    name : str, optional
+        Survey identifier (case-insensitive).  Defaults to :data:`DEFAULT_SURVEY`.
+
+    Returns
+    -------
+    SurveyConfig
+
+    Raises
+    ------
+    ValueError
+        If *name* is not a recognized survey.
+    """
     key = (name or DEFAULT_SURVEY).lower()
     if key not in SURVEYS:
         raise ValueError(f"Unknown survey '{key}'. Available: {list(SURVEYS.keys())}")
@@ -91,7 +155,11 @@ def get_survey(name: str | None = None) -> SurveyConfig:
 
 
 def _is_blank_image(img: Image.Image, threshold: int = 10) -> bool:
-    """Check if image is essentially blank (uniform color)."""
+    """Return True if the image is essentially uniform (blank/empty).
+
+    A blank image typically means the coordinates fall outside the survey
+    footprint.  The check uses the standard deviation of pixel values.
+    """
     import numpy as np
     arr = np.array(img)
     return arr.std() < threshold
@@ -101,12 +169,34 @@ def fetch_cutout(ra: float, dec: float, survey: str | None = None,
                  size: int = 0, pixscale: float = 0,
                  fov: float = 0, timeout: float = 30,
                  fallback: bool = True) -> Image.Image:
-    """Fetch a JPEG cutout image with auto-fallback.
+    """Fetch a JPEG cutout image, with optional automatic fallback.
 
-    If the requested survey returns a blank image, automatically tries
-    other surveys in priority order.
+    If the requested survey returns a blank image (e.g. no coverage at
+    the given coordinates), the function automatically tries other surveys
+    in descending priority order.
+
+    Parameters
+    ----------
+    ra, dec : float
+        Position in decimal degrees.
+    survey : str, optional
+        Survey name.  ``None`` or ``"auto"`` uses the full fallback chain.
+    size : int, optional
+        Cutout size in pixels.
+    pixscale : float, optional
+        Pixel scale in arcsec/pixel (overrides survey default).
+    fov : float, optional
+        Field of view in arc-minutes (overrides *size* if given).
+    timeout : float, optional
+        HTTP request timeout in seconds (default ``30``).
+    fallback : bool, optional
+        If True (default), try other surveys when the result is blank.
+
+    Returns
+    -------
+    PIL.Image.Image
     """
-    surveys_to_try = []
+    # Build the list of surveys to try
     if survey == "auto" or survey is None:
         surveys_to_try = list(FALLBACK_ORDER)
     else:
@@ -141,16 +231,17 @@ def fetch_cutout(ra: float, dec: float, survey: str | None = None,
 def _fetch_single(ra: float, dec: float, survey: str,
                   size: int, pixscale: float, fov: float,
                   timeout: float) -> Image.Image:
-    """Fetch from a single survey."""
+    """Fetch a cutout from a single specific survey (no fallback)."""
     cfg = get_survey(survey)
 
     ps = pixscale or cfg.default_pixscale
     if fov > 0:
-        sz = int(fov * 60 / ps)
+        sz = int(fov * 60 / ps)  # fov (arcmin) → pixels
     else:
         sz = size or cfg.default_size
     sz = min(sz, cfg.max_size)
 
+    # PanSTARRS uses a different API endpoint
     if cfg.name == "panstarrs":
         return _fetch_panstarrs(ra, dec, sz, ps, timeout)
 
@@ -167,7 +258,7 @@ def _fetch_single(ra: float, dec: float, survey: str,
 
 def _fetch_panstarrs(ra: float, dec: float, size: int, pixscale: float,
                      timeout: float) -> Image.Image:
-    """Fetch PanSTARRS color cutout via MAST API."""
+    """Fetch a PanSTARRS color cutout via the MAST fitscut service."""
     url = (
         f"https://ps1images.stsci.edu/cgi-bin/fitscut.cgi"
         f"?ra={ra}&dec={dec}&size={size}&format=jpg"
