@@ -312,6 +312,59 @@ def surveys():
                     f"{bands}{marker}")
 
 
+@main.command()
+@click.argument("targets", nargs=-1, required=False)
+@click.option("-f", "--file", "filepath", default="",
+              help="CSV/FITS file with coordinates")
+@click.option("--ra-col", default="ra", help="RA column name")
+@click.option("--dec-col", default="dec", help="Dec column name")
+@click.option("-s", "--survey", default=DEFAULT_SURVEY)
+@click.option("--fov", default=1.0, type=float, help="FoV in arcmin")
+@click.option("-n", "--limit", default=50, type=int, help="Max targets")
+def browse(targets, filepath, ra_col, dec_col, survey, fov, limit):
+    """Interactively browse sky images one by one (keyboard navigation).
+
+    Works in terminal (SSH) — uses chafa/kitty/sixel for display.
+    Controls: n/→ next, p/← prev, q quit.
+
+    Examples:
+
+        skyview browse "NGC 788" "M31" "NGC 1275"
+
+        skyview browse -f catalog.csv --ra-col RA --dec-col DEC
+
+        skyview browse -f sources.fits --fov 5
+    """
+    from skyview.api import browse as api_browse, batch_from_file
+
+    if filepath:
+        # Load from file
+        from pathlib import Path
+        ext = Path(filepath).suffix.lower()
+        if ext in (".fits", ".fit"):
+            from astropy.table import Table
+            tbl = Table.read(filepath)
+            ras = list(tbl[ra_col][:limit])
+            decs = list(tbl[dec_col][:limit])
+        elif ext in (".csv", ".tsv", ".txt"):
+            import csv
+            sep = "\t" if ext == ".tsv" else ","
+            with open(filepath) as f:
+                reader = csv.DictReader(f, delimiter=sep)
+                rows = list(reader)[:limit]
+            ras = [float(r[ra_col]) for r in rows]
+            decs = [float(r[dec_col]) for r in rows]
+        else:
+            click.echo(f"Unsupported format: {ext}")
+            sys.exit(1)
+        api_browse(ras, dec=decs, survey=survey, fov=fov)
+    elif targets:
+        api_browse(list(targets), survey=survey, fov=fov)
+    else:
+        click.echo("Provide targets or --file. See: skyview browse --help")
+        sys.exit(1)
+
+
 @main.command(name="cache-clear")
 def cache_clear():
     """Clear the local image cache."""
