@@ -536,16 +536,15 @@ def batch_from_file(filepath: str, ra_col: str = "ra", dec_col: str = "dec",
 def browse(targets=None, dec=None,
            survey: str = None, fov: float = 1.0, size: int = 0,
            scale_bar: bool = True, crosshair: bool = False,
-           figsize: tuple = (8, 8), **kwargs) -> None:
-    """Interactive browser for sky images — navigate with keyboard.
+           viewer: str = "", outdir: str = "", **kwargs) -> str:
+    """Download images and open with a system image viewer for browsing.
 
-    If called after ``batch()``, browses the last batch results (no re-download).
-    Otherwise, fetches images for the given targets.
+    Downloads all images to a directory (with scale bar overlay), then
+    launches an external image viewer (feh, eog, sxiv, etc.) that supports
+    native keyboard navigation (arrows, zoom, etc.) — much better quality
+    than terminal character rendering.
 
-    Controls:
-        - **→ / n / d** : next image
-        - **← / p / a** : previous image
-        - **q / Esc**   : quit browser
+    In Jupyter/GUI environments, falls back to matplotlib interactive mode.
 
     Parameters
     ----------
@@ -558,23 +557,35 @@ def browse(targets=None, dec=None,
     fov : float, optional
         Field of view in arc-minutes.
     scale_bar, crosshair : bool
-        Overlay options (default True).
-    figsize : tuple
-        Figure size in inches.
+        Overlay options.
+    viewer : str, optional
+        Image viewer command (default: auto-detect feh/sxiv/eog/xdg-open).
+    outdir : str, optional
+        Directory to save images. Default: temp directory.
+
+    Returns
+    -------
+    str
+        Path to the directory containing saved images.
 
     Examples
     --------
-    >>> # Browse after batch
-    >>> skyview.batch(df["ra"], df["dec"], fov=5)
-    >>> skyview.browse()  # re-uses downloaded images
-
-    >>> # Direct browse
     >>> skyview.browse(["NGC 788", "M31", "Coma Cluster"], fov=5)
+
+    >>> # After batch, browse with full resolution
+    >>> skyview.batch(df["ra"], df["dec"], fov=5)
+    >>> skyview.browse()
+
+    >>> # Save to specific dir
+    >>> skyview.browse(targets, outdir="./my_images")
     """
     import os
+    import shutil
+    import subprocess
+    import tempfile
     from skyview.overlay import annotate
 
-    # Get images: either from last batch or fetch new ones
+    # --- Collect images ---
     if targets is not None:
         items = _coerce_targets(targets, dec)
         resolved = []
@@ -603,168 +614,74 @@ def browse(targets=None, dec=None,
         browse_fov = getattr(batch, '_last_fov', fov)
     else:
         print("No images to browse. Call batch() first or provide targets.")
-        return
+        return ""
 
-    # Filter to only successful images
     valid = [(idx, label, img, err) for idx, label, img, err in images if img is not None]
     if not valid:
         print("No valid images to browse.")
-        return
+        return ""
 
-    # Check if we have a graphical display
-    has_gui = (
-        os.sys.platform == "darwin"
-        or bool(os.environ.get("DISPLAY"))
-        or bool(os.environ.get("WAYLAND_DISPLAY"))
-    )
-
-    if has_gui:
-        _browse_matplotlib(valid, browse_fov, scale_bar, crosshair, figsize)
+    # --- Save images to directory ---
+    if outdir:
+        save_dir = outdir
+        os.makedirs(save_dir, exist_ok=True)
     else:
-        _browse_terminal(valid, browse_fov, scale_bar, crosshair)
+        save_dir = tempfile.mkdtemp(prefix="skyview_browse_")
 
+    saved_paths = []
+    for i, (idx, label, img, _) in enumerate(valid):
+        img_ann = annotate(img, browse_fov, scale_bar=scale_bar, crosshair=crosshair)
+        # Clean label for filename
+        safe_label = label.replace("/", "_").replace(" ", "_").replace("(", "").replace(")", "").replace(",", "_")
+        filename = f"{i+1:03d}_{safe_label}.jpg"
+        path = os.path.join(save_dir, filename)
+        img_ann.save(path, quality=95)
+        saved_paths.append(path)
 
-def _browse_matplotlib(valid, fov, scale_bar, crosshair, figsize):
-    """Interactive browse using matplotlib GUI (with keyboard navigation)."""
-    import matplotlib.pyplot as plt
-    from skyview.overlay import annotate
+    print(f"\n📁 {len(saved_paths)} images saved to: {save_dir}")
 
-    n = len(valid)
-    state = {"current": 0}
-
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
-    plt.subplots_adjust(bottom=0.08)
-
-    def draw(idx):
-        ax.clear()
-        _, label, img, _ = valid[idx]
-        img_display = annotate(img, fov, scale_bar=scale_bar, crosshair=crosshair)
-        ax.imshow(np.array(img_display))
-        ax.set_title(f"[{idx+1}/{n}]  {label}", fontsize=12)
-        ax.set_xlabel("← / a / p : prev    → / d / n : next    q / Esc : quit",
-                       fontsize=9, color="gray")
-        ax.set_xticks([])
-        ax.set_yticks([])
-        fig.canvas.draw_idle()
-
-    def on_key(event):
-        if event.key in ('right', 'n', 'd'):
-            state["current"] = (state["current"] + 1) % n
-            draw(state["current"])
-        elif event.key in ('left', 'p', 'a'):
-            state["current"] = (state["current"] - 1) % n
-            draw(state["current"])
-        elif event.key in ('q', 'escape'):
-            plt.close(fig)
-
-    fig.canvas.mpl_connect('key_press_event', on_key)
-    draw(0)
-    plt.tight_layout()
-    plt.show()
-
-
-def _browse_terminal(valid, fov, scale_bar, crosshair):
-    """Interactive browse in terminal using chafa/kitty/sixel + keyboard input."""
-    import tempfile
-    import shutil
-    import subprocess
-    from skyview.overlay import annotate
-
-    n = len(valid)
-    current = 0
-
-    # Find a terminal image viewer
-    viewer = None
-    for tool in ("chafa", "timg", "viu", "img2sixel"):
-        if shutil.which(tool):
-            viewer = tool
-            break
-
-    if viewer is None:
-        print("No terminal image viewer found (install chafa: sudo apt install chafa)")
-        print("Falling back to saving images to /tmp/")
-        for idx, (_, label, img, _) in enumerate(valid):
-            img_ann = annotate(img, fov, scale_bar=scale_bar, crosshair=crosshair)
-            path = f"/tmp/skyview_browse_{idx}.jpg"
-            img_ann.save(path, quality=92)
-            print(f"  [{idx+1}/{n}] {label} → {path}")
-        return
-
-    def show_current():
-        """Display current image in terminal."""
-        _, label, img, _ = valid[current]
-        img_display = annotate(img, fov, scale_bar=scale_bar, crosshair=crosshair)
-
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
-            tmp = f.name
-            img_display.save(tmp, quality=92)
-
-        # Clear screen and show
-        print("\033[2J\033[H", end="")  # ANSI clear screen
-        print(f"  [{current+1}/{n}]  {label}")
-        print(f"  n/→: next  p/←: prev  q: quit\n")
-
-        try:
-            if viewer == "chafa":
-                subprocess.run([
-                    "chafa", "--size", "80x",
-                    "--symbols", "block+border+space+extra",
-                    "--color-space", "din99d",
-                    tmp
-                ], check=True)
-            elif viewer == "timg":
-                subprocess.run(["timg", "-g", "80x0", tmp], check=True)
-            elif viewer == "viu":
-                subprocess.run(["viu", "-w", "80", tmp], check=True)
-            elif viewer == "img2sixel":
-                subprocess.run(["img2sixel", "-w", "800", tmp], check=True)
-        except subprocess.CalledProcessError:
-            pass
-
-        try:
-            import os
-            os.unlink(tmp)
-        except OSError:
-            pass
-
-    # Main input loop
-    import sys
-    import tty
-    import termios
-
-    show_current()
-
-    # Read single keypress
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        while True:
-            ch = sys.stdin.read(1)
-            if ch == 'q' or ch == '\x1b':
-                # Check for arrow keys (ESC [ A/B/C/D)
-                if ch == '\x1b':
-                    ch2 = sys.stdin.read(1)
-                    if ch2 == '[':
-                        ch3 = sys.stdin.read(1)
-                        if ch3 == 'C':  # right arrow
-                            current = (current + 1) % n
-                            show_current()
-                            continue
-                        elif ch3 == 'D':  # left arrow
-                            current = (current - 1) % n
-                            show_current()
-                            continue
-                    # Plain ESC = quit
-                    break
+    # --- Try to open with image viewer ---
+    # Detect available viewer
+    if not viewer:
+        # Prefer viewers with built-in browsing (arrow keys)
+        for v in ("feh", "nsxiv", "sxiv", "eog", "gpicview", "xdg-open", "open"):
+            if shutil.which(v):
+                viewer = v
                 break
-            elif ch in ('n', 'd', ' '):
-                current = (current + 1) % n
-                show_current()
-            elif ch in ('p', 'a'):
-                current = (current - 1) % n
-                show_current()
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-        print("\033[2J\033[H", end="")  # clear screen on exit
-        print(f"Exited browser. Viewed {n} images.")
+
+    if viewer and shutil.which(viewer):
+        has_display = (
+            os.sys.platform == "darwin"
+            or bool(os.environ.get("DISPLAY"))
+            or bool(os.environ.get("WAYLAND_DISPLAY"))
+        )
+
+        if has_display:
+            print(f"🔭 Opening with {viewer}...")
+            print(f"   Controls: ← → to navigate, q to quit")
+            try:
+                if viewer == "feh":
+                    # feh: --scale-down fits to screen, -d shows filename
+                    subprocess.Popen([
+                        "feh", "--scale-down", "-d", "-S", "filename",
+                        "--draw-tinted",
+                    ] + saved_paths)
+                elif viewer in ("nsxiv", "sxiv"):
+                    subprocess.Popen([viewer, "-t"] + saved_paths)
+                elif viewer == "open":
+                    # macOS: open first image, user can arrow through in Preview
+                    subprocess.Popen(["open"] + saved_paths)
+                else:
+                    subprocess.Popen([viewer] + saved_paths)
+            except Exception as e:
+                print(f"⚠️  Could not launch {viewer}: {e}")
+        else:
+            print(f"💡 No display. View images on local machine:")
+            print(f"   scp -r {os.environ.get('USER', 'user')}@host:{save_dir} .")
+            print(f"   feh --scale-down -d {os.path.basename(save_dir)}/")
+    else:
+        print(f"💡 No image viewer found. Install one:")
+        print(f"   sudo apt install feh   # lightweight, supports arrow key browsing")
+        print(f"   View images: feh --scale-down -d {save_dir}/")
+
+    return save_dir

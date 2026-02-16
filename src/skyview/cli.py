@@ -321,24 +321,27 @@ def surveys():
 @click.option("-s", "--survey", default=DEFAULT_SURVEY)
 @click.option("--fov", default=1.0, type=float, help="FoV in arcmin")
 @click.option("-n", "--limit", default=50, type=int, help="Max targets")
-def browse(targets, filepath, ra_col, dec_col, survey, fov, limit):
-    """Interactively browse sky images one by one (keyboard navigation).
+@click.option("-o", "--outdir", default="", help="Save images to this directory")
+@click.option("--viewer", default="", help="Image viewer command (default: auto-detect)")
+def browse(targets, filepath, ra_col, dec_col, survey, fov, limit, outdir, viewer):
+    """Download images and open with system image viewer for browsing.
 
-    Works in terminal (SSH) — uses chafa/kitty/sixel for display.
-    Controls: n/→ next, p/← prev, q quit.
+    Saves high-quality images to a directory, then opens with feh/sxiv/eog
+    which support native keyboard navigation (arrows, zoom, fullscreen).
 
     Examples:
 
         skyview browse "NGC 788" "M31" "NGC 1275"
 
-        skyview browse -f catalog.csv --ra-col RA --dec-col DEC
+        skyview browse -f catalog.csv --ra-col RA --dec-col DEC --fov 5
 
-        skyview browse -f sources.fits --fov 5
+        skyview browse -f sources.fits -o ./my_images
+
+        skyview browse "M31" --viewer feh
     """
-    from skyview.api import browse as api_browse, batch_from_file
+    from skyview.api import browse as api_browse
 
     if filepath:
-        # Load from file
         from pathlib import Path
         ext = Path(filepath).suffix.lower()
         if ext in (".fits", ".fit"):
@@ -349,17 +352,17 @@ def browse(targets, filepath, ra_col, dec_col, survey, fov, limit):
         elif ext in (".csv", ".tsv", ".txt"):
             import csv
             sep = "\t" if ext == ".tsv" else ","
-            with open(filepath) as f:
-                reader = csv.DictReader(f, delimiter=sep)
+            with open(filepath) as f_:
+                reader = csv.DictReader(f_, delimiter=sep)
                 rows = list(reader)[:limit]
             ras = [float(r[ra_col]) for r in rows]
             decs = [float(r[dec_col]) for r in rows]
         else:
             click.echo(f"Unsupported format: {ext}")
             sys.exit(1)
-        api_browse(ras, dec=decs, survey=survey, fov=fov)
+        api_browse(ras, dec=decs, survey=survey, fov=fov, outdir=outdir, viewer=viewer)
     elif targets:
-        api_browse(list(targets), survey=survey, fov=fov)
+        api_browse(list(targets), survey=survey, fov=fov, outdir=outdir, viewer=viewer)
     else:
         click.echo("Provide targets or --file. See: skyview browse --help")
         sys.exit(1)
