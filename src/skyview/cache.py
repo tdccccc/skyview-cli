@@ -16,7 +16,7 @@ from pathlib import Path
 from PIL import Image
 
 #: Default cache directory
-CACHE_DIR = Path.home() / ".cache" / "skyview"
+CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "cache"
 
 
 def _cache_key(ra: float, dec: float, survey: str, size: int, pixscale: float) -> str:

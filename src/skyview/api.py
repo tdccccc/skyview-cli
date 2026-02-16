@@ -254,7 +254,7 @@ def fetch(target: str = "", ra: float = None, dec: float = None,
 def show(target: str = "", ra: float = None, dec: float = None,
          survey: str = None, fov: float = 1.0, size: int = 0,
          title: str = "", figsize: tuple = (6, 6),
-         scale_bar: bool = True, crosshair: bool = True, **kwargs) -> None:
+         scale_bar: bool = True, crosshair: bool = False, **kwargs) -> None:
     """Fetch and display a single sky image interactively.
 
     Works in Jupyter notebooks (inline) and standalone matplotlib windows.
@@ -535,7 +535,7 @@ def batch_from_file(filepath: str, ra_col: str = "ra", dec_col: str = "dec",
 
 def browse(targets=None, dec=None,
            survey: str = None, fov: float = 1.0, size: int = 0,
-           scale_bar: bool = True, crosshair: bool = True,
+           scale_bar: bool = True, crosshair: bool = False,
            figsize: tuple = (8, 8), **kwargs) -> None:
     """Interactive browser for sky images — navigate with keyboard.
 
@@ -571,7 +571,7 @@ def browse(targets=None, dec=None,
     >>> # Direct browse
     >>> skyview.browse(["NGC 788", "M31", "Coma Cluster"], fov=5)
     """
-    import matplotlib.pyplot as plt
+    import os
     from skyview.overlay import annotate
 
     # Get images: either from last batch or fetch new ones
@@ -611,6 +611,24 @@ def browse(targets=None, dec=None,
         print("No valid images to browse.")
         return
 
+    # Check if we have a graphical display
+    has_gui = (
+        os.sys.platform == "darwin"
+        or bool(os.environ.get("DISPLAY"))
+        or bool(os.environ.get("WAYLAND_DISPLAY"))
+    )
+
+    if has_gui:
+        _browse_matplotlib(valid, browse_fov, scale_bar, crosshair, figsize)
+    else:
+        _browse_terminal(valid, browse_fov, scale_bar, crosshair)
+
+
+def _browse_matplotlib(valid, fov, scale_bar, crosshair, figsize):
+    """Interactive browse using matplotlib GUI (with keyboard navigation)."""
+    import matplotlib.pyplot as plt
+    from skyview.overlay import annotate
+
     n = len(valid)
     state = {"current": 0}
 
@@ -620,7 +638,7 @@ def browse(targets=None, dec=None,
     def draw(idx):
         ax.clear()
         _, label, img, _ = valid[idx]
-        img_display = annotate(img, browse_fov, scale_bar=scale_bar, crosshair=crosshair)
+        img_display = annotate(img, fov, scale_bar=scale_bar, crosshair=crosshair)
         ax.imshow(np.array(img_display))
         ax.set_title(f"[{idx+1}/{n}]  {label}", fontsize=12)
         ax.set_xlabel("← / a / p : prev    → / d / n : next    q / Esc : quit",
@@ -643,3 +661,110 @@ def browse(targets=None, dec=None,
     draw(0)
     plt.tight_layout()
     plt.show()
+
+
+def _browse_terminal(valid, fov, scale_bar, crosshair):
+    """Interactive browse in terminal using chafa/kitty/sixel + keyboard input."""
+    import tempfile
+    import shutil
+    import subprocess
+    from skyview.overlay import annotate
+
+    n = len(valid)
+    current = 0
+
+    # Find a terminal image viewer
+    viewer = None
+    for tool in ("chafa", "timg", "viu", "img2sixel"):
+        if shutil.which(tool):
+            viewer = tool
+            break
+
+    if viewer is None:
+        print("No terminal image viewer found (install chafa: sudo apt install chafa)")
+        print("Falling back to saving images to /tmp/")
+        for idx, (_, label, img, _) in enumerate(valid):
+            img_ann = annotate(img, fov, scale_bar=scale_bar, crosshair=crosshair)
+            path = f"/tmp/skyview_browse_{idx}.jpg"
+            img_ann.save(path, quality=92)
+            print(f"  [{idx+1}/{n}] {label} → {path}")
+        return
+
+    def show_current():
+        """Display current image in terminal."""
+        _, label, img, _ = valid[current]
+        img_display = annotate(img, fov, scale_bar=scale_bar, crosshair=crosshair)
+
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+            tmp = f.name
+            img_display.save(tmp, quality=92)
+
+        # Clear screen and show
+        print("\033[2J\033[H", end="")  # ANSI clear screen
+        print(f"  [{current+1}/{n}]  {label}")
+        print(f"  n/→: next  p/←: prev  q: quit\n")
+
+        try:
+            if viewer == "chafa":
+                subprocess.run([
+                    "chafa", "--size", "80x",
+                    "--symbols", "block+border+space+extra",
+                    "--color-space", "din99d",
+                    tmp
+                ], check=True)
+            elif viewer == "timg":
+                subprocess.run(["timg", "-g", "80x0", tmp], check=True)
+            elif viewer == "viu":
+                subprocess.run(["viu", "-w", "80", tmp], check=True)
+            elif viewer == "img2sixel":
+                subprocess.run(["img2sixel", "-w", "800", tmp], check=True)
+        except subprocess.CalledProcessError:
+            pass
+
+        try:
+            import os
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+    # Main input loop
+    import sys
+    import tty
+    import termios
+
+    show_current()
+
+    # Read single keypress
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        while True:
+            ch = sys.stdin.read(1)
+            if ch == 'q' or ch == '\x1b':
+                # Check for arrow keys (ESC [ A/B/C/D)
+                if ch == '\x1b':
+                    ch2 = sys.stdin.read(1)
+                    if ch2 == '[':
+                        ch3 = sys.stdin.read(1)
+                        if ch3 == 'C':  # right arrow
+                            current = (current + 1) % n
+                            show_current()
+                            continue
+                        elif ch3 == 'D':  # left arrow
+                            current = (current - 1) % n
+                            show_current()
+                            continue
+                    # Plain ESC = quit
+                    break
+                break
+            elif ch in ('n', 'd', ' '):
+                current = (current + 1) % n
+                show_current()
+            elif ch in ('p', 'a'):
+                current = (current - 1) % n
+                show_current()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        print("\033[2J\033[H", end="")  # clear screen on exit
+        print(f"Exited browser. Viewed {n} images.")
