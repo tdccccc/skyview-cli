@@ -65,20 +65,43 @@ def show(target: str = "", ra: float = None, dec: float = None,
 
 
 def batch(targets: Sequence[Union[str, tuple]],
+          dec: Sequence[float] = None,
           survey: str = None, fov: float = 1.0, size: int = 0,
           cols: int = 5, thumb_size: tuple = (3, 3),
           save: str = "", **kwargs) -> None:
     """Fetch and display a grid of sky images.
 
     Args:
-        targets: list of object names, "ra dec" strings, or (ra, dec) tuples
+        targets: list of object names, "ra dec" strings, or (ra, dec) tuples.
+                 Can also be a sequence of RA values if `dec` is provided.
+        dec: optional sequence of Dec values (when targets is a sequence of RAs)
         survey: survey layer
         fov: field of view in arcmin
         cols: number of columns in grid
         thumb_size: (width, height) per thumbnail in inches
         save: if set, save figure to this path instead of showing
+
+    Examples:
+        batch(["NGC 788", "M31"])
+        batch([(30.28, -23.5), (10.68, 41.27)])
+        batch(df["ra"], df["dec"])
+        batch(list(zip(df["ra"], df["dec"])))
     """
     import matplotlib.pyplot as plt
+
+    # Handle batch(ra_array, dec_array) style calls
+    if dec is not None:
+        targets = list(zip(targets, dec))
+    else:
+        # Detect batch((ra_series, dec_series)) — tuple of two array-likes
+        if (isinstance(targets, tuple) and len(targets) == 2
+                and hasattr(targets[0], '__len__') and hasattr(targets[1], '__len__')
+                and not isinstance(targets[0], str)):
+            try:
+                if len(targets[0]) > 2:  # likely two arrays, not a single (ra,dec) pair
+                    targets = list(zip(targets[0], targets[1]))
+            except TypeError:
+                pass
 
     n = len(targets)
     rows = math.ceil(n / cols)
