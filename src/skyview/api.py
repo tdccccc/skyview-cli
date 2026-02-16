@@ -15,40 +15,61 @@ from skyview.resolver import parse_coordinates, resolve_name
 BATCH_MAX_PIXELS = 512
 
 
+def _is_array_like(obj):
+    """Check if obj is an array-like (numpy array, pandas Series, list, etc.) but not a string."""
+    if isinstance(obj, str):
+        return False
+    return hasattr(obj, '__iter__') and hasattr(obj, '__len__')
+
+
+def _is_2d_array(obj):
+    """Check if obj is a 2D array-like (shape (N, 2+))."""
+    if not _is_array_like(obj):
+        return False
+    try:
+        shape = getattr(obj, 'shape', None)
+        if shape is not None and len(shape) == 2 and shape[1] >= 2:
+            return True
+    except (TypeError, AttributeError):
+        pass
+    return False
+
+
 def _coerce_targets(targets, dec=None):
     """Normalize various input formats into a list of (ra, dec) or str.
 
     Handles:
-        - targets=ra_array, dec=dec_array
-        - targets=(ra_array, dec_array)   # tuple of two arrays
-        - targets=[(ra, dec), ...]        # list of tuples
-        - targets=["NGC 788", "M31"]      # list of names
-        - targets=pandas DataFrame columns, numpy arrays, etc.
+        - targets=ra_array, dec=dec_array      (two parallel arrays)
+        - targets=(ra_array, dec_array)        (tuple of two arrays)
+        - targets=np.array([[ra,dec], ...])    (2D numpy array)
+        - targets=df[['ra','dec']].values      (2D numpy array)
+        - targets=pd.Series(['NGC 788', ...])  (Series of names)
+        - targets=np.array(['NGC 788', ...])   (1D array of names)
+        - targets=[(ra, dec), ...]             (list of tuples)
+        - targets=["NGC 788", "M31"]           (list of names)
     """
     # Style: batch(ra_array, dec_array)
     if dec is not None:
         return [(float(r), float(d)) for r, d in zip(targets, dec)]
 
+    # Style: 2D array/DataFrame slice → each row is (ra, dec, ...)
+    if _is_2d_array(targets):
+        return [(float(row[0]), float(row[1])) for row in targets]
+
     # Style: batch((ra_series, dec_series)) — tuple/list of two array-likes
     if isinstance(targets, (tuple, list)) and len(targets) == 2:
         a, b = targets[0], targets[1]
-        # Check if both look like arrays (have __iter__ and __len__) and aren't strings
-        if (not isinstance(a, str) and not isinstance(b, str)
-                and hasattr(a, '__iter__') and hasattr(b, '__iter__')
-                and hasattr(a, '__len__') and hasattr(b, '__len__')):
+        if _is_array_like(a) and _is_array_like(b):
             try:
                 la, lb = len(a), len(b)
                 if la == lb and la > 0:
-                    # Could be two arrays OR a list of 2 (ra,dec) tuples
-                    # Heuristic: if elements of a are iterable, it's a list of tuples
                     first = next(iter(a))
                     if not hasattr(first, '__iter__') or isinstance(first, str):
-                        # Elements are scalars → two parallel arrays
                         return [(float(r), float(d)) for r, d in zip(a, b)]
             except (TypeError, StopIteration):
                 pass
 
-    # Already a list/array/Series of something — normalize each element
+    # Iterable of mixed items — normalize each element
     result = []
     for t in targets:
         if isinstance(t, str):
@@ -57,10 +78,10 @@ def _coerce_targets(targets, dec=None):
             # tuple, list, numpy array row, etc.
             result.append((float(t[0]), float(t[1])))
         elif hasattr(t, 'item'):
-            # numpy scalar → convert to Python float (single value, not a coord pair)
-            result.append(t.item())
+            # numpy scalar
+            result.append(str(t.item()))
         else:
-            result.append(t)
+            result.append(str(t))
     return result
 
 
