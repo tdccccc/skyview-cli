@@ -253,7 +253,8 @@ def fetch(target: str = "", ra: float = None, dec: float = None,
 
 def show(target: str = "", ra: float = None, dec: float = None,
          survey: str = None, fov: float = 1.0, size: int = 0,
-         title: str = "", figsize: tuple = (6, 6), **kwargs) -> None:
+         title: str = "", figsize: tuple = (6, 6),
+         scale_bar: bool = True, crosshair: bool = True, **kwargs) -> None:
     """Fetch and display a single sky image interactively.
 
     Works in Jupyter notebooks (inline) and standalone matplotlib windows.
@@ -275,13 +276,19 @@ def show(target: str = "", ra: float = None, dec: float = None,
         Custom plot title.
     figsize : tuple, optional
         Matplotlib figure size in inches (default ``(6, 6)``).
+    scale_bar : bool, optional
+        Draw angular scale bar (default True).
+    crosshair : bool, optional
+        Draw center crosshair (default True).
 
     Examples
     --------
     >>> skyview.show("NGC 788")
     >>> skyview.show(ra=30.28, dec=-23.5, survey="sdss", fov=3.0)
+    >>> skyview.show("M31", fov=10, scale_bar=True, crosshair=False)
     """
     import matplotlib.pyplot as plt
+    from skyview.overlay import annotate
 
     if target:
         ra_r, dec_r = parse_coordinates(target)
@@ -289,6 +296,9 @@ def show(target: str = "", ra: float = None, dec: float = None,
         ra_r, dec_r = ra, dec
 
     img = fetch(ra=ra_r, dec=dec_r, survey=survey, fov=fov, size=size)
+
+    # Add overlays
+    img = annotate(img, fov, scale_bar=scale_bar, crosshair=crosshair)
 
     fig, ax = plt.subplots(1, 1, figsize=figsize)
     ax.imshow(np.array(img))
@@ -408,7 +418,10 @@ def batch(targets, dec=None,
     for idx, (_, label, img, err) in enumerate(results):
         ax = axes[idx // cols][idx % cols]
         if img is not None:
-            ax.imshow(np.array(img))
+            # Add scale bar to each thumbnail
+            from skyview.overlay import add_scale_bar
+            img_annotated = add_scale_bar(img, fov)
+            ax.imshow(np.array(img_annotated))
             ax.set_title(label, fontsize=8)
         else:
             ax.text(0.5, 0.5, f"Error:\n{err}", ha="center", va="center",
@@ -427,6 +440,11 @@ def batch(targets, dec=None,
         print(f"Saved to {save}")
     else:
         plt.show()
+
+    # Store results for interactive browsing
+    batch._last_results = results
+    batch._last_fov = fov
+    batch._last_survey = survey
 
 
 def resolve(name: str) -> tuple[float, float]:
@@ -513,3 +531,115 @@ def batch_from_file(filepath: str, ra_col: str = "ra", dec_col: str = "dec",
         batch(targets, survey=survey, fov=fov, cols=cols, save=save, **kwargs)
     else:
         batch(ras, dec=decs, survey=survey, fov=fov, cols=cols, save=save, **kwargs)
+
+
+def browse(targets=None, dec=None,
+           survey: str = None, fov: float = 1.0, size: int = 0,
+           scale_bar: bool = True, crosshair: bool = True,
+           figsize: tuple = (8, 8), **kwargs) -> None:
+    """Interactive browser for sky images — navigate with keyboard.
+
+    If called after ``batch()``, browses the last batch results (no re-download).
+    Otherwise, fetches images for the given targets.
+
+    Controls:
+        - **→ / n / d** : next image
+        - **← / p / a** : previous image
+        - **q / Esc**   : quit browser
+
+    Parameters
+    ----------
+    targets : various, optional
+        Same formats as ``batch()``. If None, uses last batch() results.
+    dec : array-like, optional
+        Dec values when targets is RA array.
+    survey : str, optional
+        Survey layer.
+    fov : float, optional
+        Field of view in arc-minutes.
+    scale_bar, crosshair : bool
+        Overlay options (default True).
+    figsize : tuple
+        Figure size in inches.
+
+    Examples
+    --------
+    >>> # Browse after batch
+    >>> skyview.batch(df["ra"], df["dec"], fov=5)
+    >>> skyview.browse()  # re-uses downloaded images
+
+    >>> # Direct browse
+    >>> skyview.browse(["NGC 788", "M31", "Coma Cluster"], fov=5)
+    """
+    import matplotlib.pyplot as plt
+    from skyview.overlay import annotate
+
+    # Get images: either from last batch or fetch new ones
+    if targets is not None:
+        items = _coerce_targets(targets, dec)
+        resolved = []
+        for t in items:
+            try:
+                resolved.append(_resolve_target(t))
+            except Exception:
+                resolved.append((str(t), None, None))
+
+        images = []
+        print(f"Fetching {len(resolved)} images...", flush=True)
+        for i, (label, ra_t, dec_t) in enumerate(resolved):
+            if ra_t is not None:
+                try:
+                    img = fetch_cutout(ra_t, dec_t, survey=survey, fov=fov, size=size)
+                    images.append((i, label, img, None))
+                except Exception as e:
+                    images.append((i, label, None, e))
+            else:
+                images.append((i, label, None, ValueError("Could not resolve")))
+            if (i + 1) % 5 == 0 or i + 1 == len(resolved):
+                print(f"  {i+1}/{len(resolved)}", flush=True)
+        browse_fov = fov
+    elif hasattr(batch, '_last_results') and batch._last_results:
+        images = batch._last_results
+        browse_fov = getattr(batch, '_last_fov', fov)
+    else:
+        print("No images to browse. Call batch() first or provide targets.")
+        return
+
+    # Filter to only successful images
+    valid = [(idx, label, img, err) for idx, label, img, err in images if img is not None]
+    if not valid:
+        print("No valid images to browse.")
+        return
+
+    n = len(valid)
+    state = {"current": 0}
+
+    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    plt.subplots_adjust(bottom=0.08)
+
+    def draw(idx):
+        ax.clear()
+        _, label, img, _ = valid[idx]
+        img_display = annotate(img, browse_fov, scale_bar=scale_bar, crosshair=crosshair)
+        ax.imshow(np.array(img_display))
+        ax.set_title(f"[{idx+1}/{n}]  {label}", fontsize=12)
+        ax.set_xlabel("← / a / p : prev    → / d / n : next    q / Esc : quit",
+                       fontsize=9, color="gray")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        fig.canvas.draw_idle()
+
+    def on_key(event):
+        if event.key in ('right', 'n', 'd'):
+            state["current"] = (state["current"] + 1) % n
+            draw(state["current"])
+        elif event.key in ('left', 'p', 'a'):
+            state["current"] = (state["current"] - 1) % n
+            draw(state["current"])
+        elif event.key in ('q', 'escape'):
+            plt.close(fig)
+
+    fig.canvas.mpl_connect('key_press_event', on_key)
+    draw(0)
+    plt.tight_layout()
+    plt.show()

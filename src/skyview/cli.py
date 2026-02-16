@@ -107,8 +107,14 @@ def _display_in_terminal(image_path: str, width: int = 80) -> bool:
     elif protocol in ("chafa", "timg", "viu"):
         try:
             if protocol == "chafa":
-                subprocess.run(["chafa", "--size", f"{width}x", image_path],
-                               check=True)
+                # Use symbols mode for best quality, higher size for detail
+                subprocess.run([
+                    "chafa",
+                    "--size", f"{width}x",
+                    "--symbols", "block+border+space+extra",
+                    "--color-space", "din99d",
+                    image_path
+                ], check=True)
             elif protocol == "timg":
                 subprocess.run(["timg", "-g", f"{width}x0", image_path],
                                check=True)
@@ -207,6 +213,10 @@ def show(target, survey, fov, size, output):
 
     img = fetch(ra=ra, dec=dec, survey=survey, fov=fov, size=size)
 
+    # Add scale bar and crosshair
+    from skyview.overlay import annotate
+    img = annotate(img, fov)
+
     if output:
         img.save(output)
         click.echo(f"💾 Saved to {output}")
@@ -300,6 +310,29 @@ def surveys():
         click.echo(f"  {name:15s}  pixscale={cfg.default_pixscale:.3f}\"/px  "
                     f"dec=[{cfg.dec_range[0]:+.0f}°,{cfg.dec_range[1]:+.0f}°]"
                     f"{bands}{marker}")
+
+
+@main.command(name="cache-clear")
+def cache_clear():
+    """Clear the local image cache."""
+    from skyview.cache import clear_cache, cache_size, CACHE_DIR
+    count, size_mb = cache_size()
+    if count == 0:
+        click.echo("Cache is empty.")
+        return
+    click.echo(f"Cache: {count} files, {size_mb:.1f} MB in {CACHE_DIR}")
+    removed = clear_cache()
+    click.echo(f"✅ Removed {removed} cached images.")
+
+
+@main.command(name="cache-info")
+def cache_info():
+    """Show cache location and size."""
+    from skyview.cache import cache_size, CACHE_DIR
+    count, size_mb = cache_size()
+    click.echo(f"📁 Cache directory: {CACHE_DIR}")
+    click.echo(f"   Files: {count}")
+    click.echo(f"   Size:  {size_mb:.1f} MB")
 
 
 if __name__ == "__main__":

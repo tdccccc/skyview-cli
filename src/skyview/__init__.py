@@ -17,4 +17,5 @@ Quick start::
 """
 __version__ = "0.1.0"
 
-from skyview.api import show, batch, fetch, resolve, batch_from_file  # noqa: F401
+from skyview.api import show, batch, fetch, resolve, batch_from_file, browse  # noqa: F401
+from skyview.cache import clear_cache, cache_size  # noqa: F401

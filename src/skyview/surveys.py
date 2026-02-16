@@ -245,12 +245,14 @@ def fetch_cutout(ra: float, dec: float, survey: str | None = None,
 
 def _fetch_single(ra: float, dec: float, survey: str,
                   size: int, pixscale: float, fov: float,
-                  timeout: float, max_retries: int = 3) -> Image.Image:
+                  timeout: float, max_retries: int = 3,
+                  use_cache: bool = True) -> Image.Image:
     """Fetch a cutout from a single specific survey (no fallback).
 
-    Retries with exponential backoff on 429 (rate limit) errors.
+    Checks local cache first; retries with exponential backoff on 429.
     """
     import time
+    from skyview.cache import get_cached, put_cache
 
     cfg = get_survey(survey)
 
@@ -261,9 +263,18 @@ def _fetch_single(ra: float, dec: float, survey: str,
         sz = size or cfg.default_size
     sz = min(sz, cfg.max_size)
 
+    # Check cache first
+    if use_cache:
+        cached = get_cached(ra, dec, cfg.name, sz, ps)
+        if cached is not None:
+            return cached
+
     # PanSTARRS uses a different API endpoint
     if cfg.name == "panstarrs":
-        return _fetch_panstarrs(ra, dec, sz, ps, timeout)
+        img = _fetch_panstarrs(ra, dec, sz, ps, timeout)
+        if use_cache:
+            put_cache(ra, dec, cfg.name, sz, ps, img)
+        return img
 
     url = cfg.cutout_url(ra, dec, sz, ps)
 
@@ -280,7 +291,10 @@ def _fetch_single(ra: float, dec: float, survey: str,
         if "image" not in content_type:
             raise RuntimeError(f"Survey {survey} returned non-image: {content_type}")
 
-        return Image.open(BytesIO(resp.content))
+        img = Image.open(BytesIO(resp.content))
+        if use_cache:
+            put_cache(ra, dec, cfg.name, sz, ps, img)
+        return img
 
     # All retries exhausted
     resp.raise_for_status()  # will raise the 429 error
