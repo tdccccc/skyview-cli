@@ -48,15 +48,18 @@ def _coerce_targets(targets, dec=None):
             except (TypeError, StopIteration):
                 pass
 
-    # Already a list of something — normalize each element
+    # Already a list/array/Series of something — normalize each element
     result = []
     for t in targets:
         if isinstance(t, str):
             result.append(t)
-        elif isinstance(t, (list, tuple)) and len(t) >= 2:
+        elif hasattr(t, '__len__') and not isinstance(t, str) and len(t) >= 2:
+            # tuple, list, numpy array row, etc.
             result.append((float(t[0]), float(t[1])))
+        elif hasattr(t, 'item'):
+            # numpy scalar → convert to Python float (single value, not a coord pair)
+            result.append(t.item())
         else:
-            # numpy scalar or similar — can't be a coordinate pair
             result.append(t)
     return result
 
