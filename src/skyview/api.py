@@ -316,7 +316,8 @@ def show(target: str = "", ra: float = None, dec: float = None,
 def batch(targets, dec=None,
           survey: str = None, fov: float = 1.0, size: int = 0,
           cols: int = 5, thumb_size: tuple = (3, 3),
-          save: str = "", workers: int = 3, **kwargs) -> None:
+          save: str = "", workers: int = 3,
+          labels: Sequence[str] = None, **kwargs) -> None:
     """Fetch and display a grid of sky image thumbnails.
 
     Downloads images concurrently for speed.  Thumbnail pixel size is
@@ -352,6 +353,9 @@ def batch(targets, dec=None,
     workers : int, optional
         Number of concurrent download threads (default ``3``).
         Keep low to avoid 429 rate limits from survey servers.
+    labels : sequence of str, optional
+        Custom labels for each target (e.g. object names from a catalog).
+        When provided, these override the auto-generated labels.
 
     Examples
     --------
@@ -381,9 +385,12 @@ def batch(targets, dec=None,
 
     # Resolve all targets to (label, ra, dec)
     resolved = []
-    for t in items:
+    for i, t in enumerate(items):
         try:
-            resolved.append(_resolve_target(t))
+            label, ra_t, dec_t = _resolve_target(t)
+            if labels and i < len(labels):
+                label = str(labels[i])
+            resolved.append((label, ra_t, dec_t))
         except Exception as e:
             resolved.append((str(t), None, None))
 
@@ -528,7 +535,8 @@ def batch_from_file(filepath: str, ra_col: str = "ra", dec_col: str = "dec",
 
     if names:
         targets = [(float(ra), float(dec)) for ra, dec in zip(ras, decs)]
-        batch(targets, survey=survey, fov=fov, cols=cols, save=save, **kwargs)
+        batch(targets, survey=survey, fov=fov, cols=cols, save=save,
+              labels=names, **kwargs)
     else:
         batch(ras, dec=decs, survey=survey, fov=fov, cols=cols, save=save, **kwargs)
 

@@ -88,7 +88,7 @@ SURVEYS: dict[str, SurveyConfig] = {
     ),
     "panstarrs": SurveyConfig(
         name="panstarrs",
-        base_url="https://ps1images.stsci.edu/cgi-bin/ps1cutouts",
+        base_url="https://ps1images.stsci.edu/cgi-bin/fitscut.cgi",
         default_pixscale=0.25, default_size=256, max_size=1200,
         priority=80, dec_range=(-30, 90),
         bands="grizy",

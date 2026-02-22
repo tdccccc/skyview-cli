@@ -15,8 +15,18 @@ import os
 from pathlib import Path
 from PIL import Image
 
-#: Default cache directory
-CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "cache"
+
+def _default_cache_dir() -> Path:
+    """Return the default cache directory following XDG Base Directory spec."""
+    if os.environ.get("SKYVIEW_CACHE_DIR"):
+        return Path(os.environ["SKYVIEW_CACHE_DIR"])
+    xdg = os.environ.get("XDG_CACHE_HOME", "")
+    base = Path(xdg) if xdg else Path.home() / ".cache"
+    return base / "skyview"
+
+
+#: Cache directory (override with SKYVIEW_CACHE_DIR env var)
+CACHE_DIR = _default_cache_dir()
 
 
 def _cache_key(ra: float, dec: float, survey: str, size: int, pixscale: float) -> str:
