@@ -267,13 +267,13 @@ def show(target, survey, fov, size, output, viewer):
 
 @main.command()
 @click.argument("targets", nargs=-1, required=False)
-@click.option("-f", "--file", "filepath", default="",
+@click.option("-F", "--file", "filepath", default="",
               help="CSV/FITS file with coordinates")
 @click.option("--ra-col", default="ra", help="RA column name")
 @click.option("--dec-col", default="dec", help="Dec column name")
 @click.option("--name-col", default="", help="Name/label column")
 @click.option("-s", "--survey", default=DEFAULT_SURVEY)
-@click.option("--fov", default=1.0, type=float, help="FoV in arcmin")
+@click.option("-f", "--fov", default=1.0, type=float, help="FoV in arcmin")
 @click.option("--cols", default=5, type=int, help="Grid columns")
 @click.option("-n", "--limit", default=50, type=int, help="Max targets")
 @click.option("-o", "--output", default="", help="Save grid to file")
@@ -407,12 +407,12 @@ def surveys():
 
 @main.command()
 @click.argument("targets", nargs=-1, required=False)
-@click.option("-f", "--file", "filepath", default="",
+@click.option("-F", "--file", "filepath", default="",
               help="CSV/FITS file with coordinates")
 @click.option("--ra-col", default="ra", help="RA column name")
 @click.option("--dec-col", default="dec", help="Dec column name")
 @click.option("-s", "--survey", default=DEFAULT_SURVEY)
-@click.option("--fov", default=1.0, type=float, help="FoV in arcmin")
+@click.option("-f", "--fov", default=1.0, type=float, help="FoV in arcmin")
 @click.option("-n", "--limit", default=50, type=int, help="Max targets")
 @click.option("-o", "--outdir", default="", help="Save images to this directory")
 @click.option("--viewer", default="", help="Image viewer command (default: auto-detect)")
