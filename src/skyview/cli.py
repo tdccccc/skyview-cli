@@ -128,16 +128,53 @@ def _display_in_terminal(image_path: str, width: int = 80) -> bool:
     return False
 
 
-def _show_image_cli(img, title: str = ""):
+def _find_system_viewer() -> str | None:
+    """Find an available system image viewer.
+
+    Returns the command name, or None if no viewer found.
+    """
+    for v in ("feh", "nsxiv", "sxiv", "eog", "gpicview", "xdg-open", "open"):
+        if shutil.which(v):
+            return v
+    return None
+
+
+def _open_with_viewer(image_path: str, viewer: str, title: str = "") -> bool:
+    """Open an image file with a system image viewer. Returns True if launched."""
+    import subprocess
+    try:
+        if viewer == "feh":
+            cmd = ["feh", "--scale-down", "--title", title or "skyview", image_path]
+        else:
+            cmd = [viewer, image_path]
+        subprocess.Popen(cmd)
+        return True
+    except (OSError, FileNotFoundError):
+        return False
+
+
+def _show_image_cli(img, title: str = "", viewer: str = ""):
     """Display a PIL Image in the best available way.
 
     Priority:
-    1. If graphical display available → matplotlib window
-    2. Terminal image protocol (kitty/iTerm2/sixel/chafa)
-    3. Save to temp file and print path
+    1. If graphical display available → system image viewer (feh/eog/xdg-open)
+    2. If no viewer found → matplotlib fallback
+    3. Terminal image protocol (kitty/iTerm2/sixel/chafa)
+    4. Save to temp file and print path
     """
     if _has_display():
-        # Use matplotlib GUI
+        v = viewer if (viewer and shutil.which(viewer)) else _find_system_viewer()
+        if v:
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+                tmp_path = f.name
+                img.save(tmp_path, quality=95)
+            if _open_with_viewer(tmp_path, v, title):
+                click.echo(f"Opened with {v}")
+                return
+            # Viewer launch failed, clean up and fall through
+            os.unlink(tmp_path)
+
+        # No system viewer — fall back to matplotlib
         import matplotlib.pyplot as plt
         import numpy as np
         fig, ax = plt.subplots(1, 1, figsize=(8, 8))
@@ -155,13 +192,13 @@ def _show_image_cli(img, title: str = ""):
         img.save(tmp_path, quality=90)
 
     if title:
-        click.echo(f"🔭 {title}")
+        click.echo(f"{title}")
 
     if _display_in_terminal(tmp_path):
         os.unlink(tmp_path)
     else:
         # Can't display — keep the file and tell user
-        click.echo(f"💾 No display available. Image saved to: {tmp_path}")
+        click.echo(f"No display available. Image saved to: {tmp_path}")
         click.echo(f"   Copy to local machine:  scp {os.environ.get('USER', 'user')}@host:{tmp_path} .")
 
 
@@ -184,7 +221,8 @@ def main():
               help="Field of view in arcmin (default: 1.0)")
 @click.option("--size", default=0, type=int, help="Image size in pixels")
 @click.option("-o", "--output", default="", help="Save image to file instead of displaying")
-def show(target, survey, fov, size, output):
+@click.option("--viewer", default="", help="Image viewer command (default: auto-detect feh/eog/xdg-open)")
+def show(target, survey, fov, size, output, viewer):
     """Show sky image at a position.
 
     TARGET can be an object name (NGC 788, M31) or coordinates (30.28 -23.5).
@@ -203,6 +241,8 @@ def show(target, survey, fov, size, output):
         skyview show NGC 788 -s sdss -f 3.0
 
         skyview show NGC 788 -o ngc788.jpg
+
+        skyview show NGC 788 --viewer feh
     """
     from skyview.api import fetch
     from skyview.resolver import parse_coordinates
@@ -221,7 +261,8 @@ def show(target, survey, fov, size, output):
         img.save(output)
         click.echo(f"💾 Saved to {output}")
     else:
-        _show_image_cli(img, title=f"{target_str}  [{survey}]  FoV={fov}'")
+        _show_image_cli(img, title=f"{target_str}  [{survey}]  FoV={fov}'",
+                        viewer=viewer)
 
 
 @main.command()
