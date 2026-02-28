@@ -277,46 +277,98 @@ def show(target, survey, fov, size, output, viewer):
 @click.option("--cols", default=5, type=int, help="Grid columns")
 @click.option("-n", "--limit", default=50, type=int, help="Max targets")
 @click.option("-o", "--output", default="", help="Save grid to file")
+@click.option("--grid", is_flag=True, default=False,
+              help="Force matplotlib grid view instead of system viewer")
+@click.option("--viewer", default="", help="Image viewer command (default: auto-detect)")
 def batch(targets, filepath, ra_col, dec_col, name_col,
-          survey, fov, cols, limit, output):
-    """Show a grid of sky images.
+          survey, fov, cols, limit, output, grid, viewer):
+    """Show a batch of sky images.
+
+    By default, opens images in a system viewer (feh/sxiv/eog) with
+    left/right arrow key navigation. Use --grid for matplotlib grid view.
 
     Pass object names or a file with coordinates.
-
-    On remote servers, the grid is saved and displayed in terminal or
-    as a temp file you can scp to your local machine.
 
     Examples:
 
         skyview batch "NGC 788" "M31" "NGC 1275"
 
+        skyview batch "NGC 788" "M31" "NGC 1275" --grid
+
         skyview batch -f catalog.csv --ra-col RA --dec-col DEC
 
         skyview batch -f sources.fits -o gallery.png
     """
-    from skyview.api import batch as api_batch, batch_from_file
+    from skyview.api import batch as api_batch, batch_from_file, browse as api_browse
 
-    # If no display and no output specified, auto-save to temp file
-    if not output and not _has_display():
-        output = tempfile.mktemp(suffix=".png", prefix="skyview_batch_")
+    # If --output is given, always save grid to file
+    if output:
+        if filepath:
+            batch_from_file(filepath, ra_col=ra_col, dec_col=dec_col,
+                            name_col=name_col, survey=survey, fov=fov,
+                            cols=cols, save=output, limit=limit)
+        elif targets:
+            api_batch(list(targets), survey=survey, fov=fov, cols=cols, save=output)
+        else:
+            click.echo("Provide targets or --file. See: skyview batch --help")
+            sys.exit(1)
+        return
+
+    # No --output: decide between system viewer and matplotlib grid
+    use_viewer = not grid and _has_display()
+    if use_viewer:
+        v = viewer if (viewer and shutil.which(viewer)) else _find_system_viewer()
+        if v:
+            # Use browse mode: save individual images → open with system viewer
+            if filepath:
+                from pathlib import Path
+                ext = Path(filepath).suffix.lower()
+                if ext in (".fits", ".fit"):
+                    from astropy.table import Table
+                    tbl = Table.read(filepath)
+                    ras = list(tbl[ra_col][:limit])
+                    decs = list(tbl[dec_col][:limit])
+                elif ext in (".csv", ".tsv", ".txt"):
+                    import csv
+                    sep = "\t" if ext == ".tsv" else ","
+                    with open(filepath) as f_:
+                        reader = csv.DictReader(f_, delimiter=sep)
+                        rows = list(reader)[:limit]
+                    ras = [float(r[ra_col]) for r in rows]
+                    decs = [float(r[dec_col]) for r in rows]
+                else:
+                    click.echo(f"Unsupported format: {ext}")
+                    sys.exit(1)
+                api_browse(ras, dec=decs, survey=survey, fov=fov, viewer=v)
+            elif targets:
+                api_browse(list(targets), survey=survey, fov=fov, viewer=v)
+            else:
+                click.echo("Provide targets or --file. See: skyview batch --help")
+                sys.exit(1)
+            return
+
+    # Fallback: matplotlib grid or terminal display
+    if not _has_display():
+        tmp_output = tempfile.mktemp(suffix=".png", prefix="skyview_batch_")
         auto_save = True
     else:
+        tmp_output = ""
         auto_save = False
 
     if filepath:
         batch_from_file(filepath, ra_col=ra_col, dec_col=dec_col,
                         name_col=name_col, survey=survey, fov=fov,
-                        cols=cols, save=output, limit=limit)
+                        cols=cols, save=tmp_output, limit=limit)
     elif targets:
-        api_batch(list(targets), survey=survey, fov=fov, cols=cols, save=output)
+        api_batch(list(targets), survey=survey, fov=fov, cols=cols, save=tmp_output)
     else:
         click.echo("Provide targets or --file. See: skyview batch --help")
         sys.exit(1)
 
     # If we auto-saved, try to display in terminal
-    if auto_save and os.path.exists(output):
-        if not _display_in_terminal(output):
-            click.echo(f"💾 Grid saved to: {output}")
+    if auto_save and os.path.exists(tmp_output):
+        if not _display_in_terminal(tmp_output):
+            click.echo(f"Grid saved to: {tmp_output}")
 
 
 @main.command()
