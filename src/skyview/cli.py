@@ -484,34 +484,5 @@ def cache_info():
     click.echo(f"   Size:  {size_mb:.1f} MB")
 
 
-@main.command()
-@click.argument("shell", type=click.Choice(["bash", "zsh", "fish"]), default="bash")
-def completion(shell):
-    """Generate shell completion script.
-
-    Install for current session:
-
-        eval "$(skyview completion bash)"
-
-    Or add to shell profile for persistence:
-
-        skyview completion bash >> ~/.bashrc
-
-        skyview completion zsh >> ~/.zshrc
-
-        skyview completion fish > ~/.config/fish/completions/skyview.fish
-    """
-    import subprocess
-    skyview_bin = shutil.which("skyview")
-    if not skyview_bin:
-        click.echo("Error: skyview not found in PATH", err=True)
-        sys.exit(1)
-    env = {**os.environ, "_SKYVIEW_COMPLETE": f"{shell}_source"}
-    result = subprocess.run(
-        [skyview_bin], env=env, capture_output=True, text=True
-    )
-    click.echo(result.stdout)
-
-
 if __name__ == "__main__":
     main()
