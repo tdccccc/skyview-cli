@@ -35,12 +35,22 @@ def add_scale_bar(img: Image.Image, fov_arcmin: float,
         Annotated copy of the image.
     """
     img = img.copy().convert("RGB")
+
+    # Upscale tiny images so the overlay elements have enough pixels to render
+    MIN_OVERLAY_SIZE = 256
+    w_orig, h_orig = img.size
+    if w_orig < MIN_OVERLAY_SIZE or h_orig < MIN_OVERLAY_SIZE:
+        scale = max(MIN_OVERLAY_SIZE / w_orig, MIN_OVERLAY_SIZE / h_orig)
+        new_w = int(w_orig * scale)
+        new_h = int(h_orig * scale)
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+
     draw = ImageDraw.Draw(img)
     w, h = img.size
 
     # Calculate a "nice" bar length in arcsec
     target_arcsec = fov_arcmin * 60 * bar_fraction
-    nice_values = [1, 2, 5, 10, 15, 20, 30, 60, 120, 180, 300, 600, 1200, 1800, 3600]
+    nice_values = [0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 20, 30, 60, 120, 180, 300, 600, 1200, 1800, 3600]
     bar_arcsec = min(nice_values, key=lambda x: abs(x - target_arcsec))
 
     # Bar length in pixels
@@ -51,8 +61,10 @@ def add_scale_bar(img: Image.Image, fov_arcmin: float,
     # Label
     if bar_arcsec >= 60:
         label = f"{bar_arcsec / 60:.0f}'"
-    else:
+    elif bar_arcsec >= 1:
         label = f'{bar_arcsec:.0f}"'
+    else:
+        label = f'{bar_arcsec:.1f}"'
 
     # Position
     margin = int(w * 0.05)
